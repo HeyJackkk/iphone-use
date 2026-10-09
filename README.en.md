@@ -113,7 +113,7 @@ Repeated preview opens in the same chat reuse the existing widget. Its toolbar o
 
 ## Technical details
 
-- **Local USB transport:** Python accesses WDA through a loopback-only forwarder; runtime and signing data stay on the Mac.
+- **Local USB transport:** Python accesses WDA through a private Unix socket and USB forwarder; runtime and signing data stay on the Mac.
 - **Reuse:** persistent HTTP connections, WDA sessions, healthy services, and builds reduce repeated work.
 - **Compact observations and compound actions:** omit duplicate tree fields, skip XML for screenshot-only reads, and reduce turns with batch / scroll-search / list collection.
 - **Background setup:** downloads, builds, and startup return queryable job IDs; repeated setup reuses matching active jobs.
@@ -143,7 +143,11 @@ Abnormal UI states return a screenshot for the model to inspect before choosing 
 
 New installations use `~/.local/share/iphone-use/`. Set `IPHONE_USE_STATE_DIR` for another external directory; `WDA_STATE_DIR` remains supported. If the new default directory does not exist, an existing older configuration directory is reused so device configuration and builds are retained.
 
-Runtime directories use mode 700 and private configuration / image files use 600. Explicit screenshots have retention limits; preview streams stay in memory. Signing material, device data, logs, and dependency directories are excluded from source packages. `WDA_URL` accepts a local address; the default forwarded port is 18100, and remote addresses are rejected.
+Runtime directories use mode 700 and private configuration, authentication tokens and image files use 600. Explicit screenshots have retention limits; preview streams stay in memory. Signing material, device data, logs, and dependency directories are excluded from source packages. `WDA_URL` still accepts a local logical address (default 18100), while actual control transport uses a private Unix socket. There is no Mac TCP control listener; remote addresses are rejected.
+
+The 0.3.9 hardened build binds both phone HTTP and independent MJPEG listeners to loopback and authenticates both on the phone. Tokens are generated privately and are never source files, tool arguments or command-line values. The original pinned WDA checkout stays unchanged; builds use a digest-addressed isolated patched copy. Rebuild/restart legacy installations; unauthenticated external services are no longer reused. Screenshots and UI text still return to the MCP host/model: transport authentication does not change that privacy boundary.
+
+Run `node scripts/check_device_security.mjs` for bounded read-only device acceptance covering missing/wrong/duplicate credentials, per-request authentication and legitimate fragmented MJPEG requests. It does not type text or execute phone business actions.
 
 ```sh
 git pull --ff-only

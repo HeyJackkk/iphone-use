@@ -292,7 +292,8 @@ class ScreenHubTests(unittest.TestCase):
             dependency = self.directory / "runtime/forward/node_modules/appium-ios-device"
             dependency.mkdir(parents=True)
             command = self.hub._command()
-            self.assertEqual(command[-2:], ["TEST-DEVICE-1234", "9100"])
+            self.assertEqual(command[-3:-1], ["TEST-DEVICE-1234", "9100"])
+            self.assertEqual(command[-1], str(self.directory.resolve() / 'auth-token'))
             self.assertEqual(Path(command[1]).read_bytes(), (ROOT / "tooling/screen-stream.mjs").read_bytes())
             self.assertNotIn("secret", Path(command[1]).read_text())
             self.assertEqual(os.stat(command[1]).st_mode & 0o777, 0o600)
@@ -314,6 +315,10 @@ class NodeStreamTests(unittest.TestCase):
 
             def do_GET(self):
                 requests.append(self.path)
+                self.asserted_auth = self.headers.get('Authorization')
+                if self.asserted_auth != 'Bearer ' + 'a' * 64:
+                    self.send_error(401)
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
                 self.send_header("Transfer-Encoding", "chunked")
@@ -330,6 +335,9 @@ class NodeStreamTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as temporary:
                 runtime = Path(temporary)
+                token_path = runtime / 'auth-token'
+                token_path.write_text('a' * 64)
+                token_path.chmod(0o600)
                 script = runtime / "screen-stream.mjs"
                 script.write_bytes((ROOT / "tooling/screen-stream.mjs").read_bytes())
                 stub = runtime / "node_modules/appium-ios-device"
@@ -339,7 +347,7 @@ class NodeStreamTests(unittest.TestCase):
                 # usbmux plist reader. A fresh, flowing TCP fixture hides this.
                 (stub / "index.js").write_text("import net from 'node:net'; export default {utilities:{connectPort: async () => "
                                                f"net.connect({server.server_port}, '127.0.0.1').pause()" + "}};")
-                result = subprocess.run([shutil.which("node"), str(script), "TEST-DEVICE-1234", "9100"],
+                result = subprocess.run([shutil.which("node"), str(script), "TEST-DEVICE-1234", "9100", str(token_path)],
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
                 self.assertEqual(result.stdout, body)
                 self.assertEqual(result.stderr, b"")

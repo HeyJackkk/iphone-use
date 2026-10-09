@@ -17,17 +17,19 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from wda_client import WDAClient, WDAError
 from wda_controller import CALL_BUDGET, PhoneController, TYPING_FREQUENCY
 from wda_setup import SetupManager, state_directory
+from wda_security import auth_token, control_socket
 from wda_apps import AppCatalog
 from wda_screen import ScreenHub
 import wda_image
 from analytics import Analytics
 
 PUAError=WDAError
-VERSION="0.3.8"
-SCREEN_URI="ui://iphone-use/phone-0.3.8.html"
+VERSION="0.3.9"
+SCREEN_URI="ui://iphone-use/phone-0.3.9.html"
 # Codex scopes reuse to the host, chat, server and UI resource. A stable result
 # ID keeps repeated READY/open/pause/resume calls in that chat on one panel,
 # including after the MCP process reconnects; no device identifiers are needed.
@@ -266,7 +268,9 @@ class Runtime:
             try:configured_url="http://127.0.0.1:"+str(json.loads(config.read_text()).get("local_port",18100))
             except (ValueError,OSError):pass
         self.base_url=base_url or os.environ.get("WDA_URL") or configured_url or "http://127.0.0.1:18100"
-        self.client=WDAClient(self.base_url)
+        self.auth_token=auth_token(self.state_dir)
+        self.socket_path=control_socket(self.state_dir,urllib.parse.urlsplit(self.base_url).port or 80)
+        self.client=WDAClient(self.base_url,auth_token=self.auth_token,socket_path=self.socket_path)
         self.phone=PhoneController(self.client,self.state_dir)
         self.setup_manager=SetupManager(self.state_dir,self.base_url)
         self.apps=AppCatalog(self.state_dir,self.setup_manager)
@@ -367,7 +371,7 @@ class Runtime:
         if action=="refresh":
             pause_id=self.screen.reconnect_pause_id()
             state=self.screen.restart()
-            probe=WDAClient(self.base_url,timeout=2)
+            probe=WDAClient(self.base_url,timeout=2,auth_token=self.auth_token,socket_path=self.socket_path)
             try:
                 ready=(probe.request("GET","/status").get("value") or {}).get("ready") is True
                 if ready:
@@ -380,7 +384,7 @@ class Runtime:
             return {"ok":True,"action":action,"service_ready":ready,**state,**self.screen.pause_status()}
         if self.screen.paused():
             raise WDAError("preview_paused","The preview is paused while the user authenticates on the iPhone. No capture or phone action was made.",details={"action_executed":False})
-        client=WDAClient(self.base_url,timeout=8)
+        client=WDAClient(self.base_url,timeout=8,auth_token=self.auth_token,socket_path=self.socket_path)
         try:
             if action=="home":
                 lock_path=self.state_dir/"operation.lock"
@@ -503,7 +507,8 @@ class Runtime:
                 if result.get("ok") and args["action"]=="configure" and "local_port" in args:
                     self.base_url=candidate_url;self.setup_manager=manager
                     self.apps.setup_manager=manager
-                    self.client=WDAClient(self.base_url);self.phone.client=self.client
+                    self.socket_path=control_socket(self.state_dir,args["local_port"])
+                    self.client=WDAClient(self.base_url,auth_token=self.auth_token,socket_path=self.socket_path);self.phone.client=self.client
                 return result
             if op=="ready":
                 try:self.screen.start()

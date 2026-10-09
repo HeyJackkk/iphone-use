@@ -1,0 +1,185 @@
+diff --git a/WebDriverAgentLib/Routing/FBHTTPServer.m b/WebDriverAgentLib/Routing/FBHTTPServer.m
+index 767e7fc..de9e092 100644
+--- a/WebDriverAgentLib/Routing/FBHTTPServer.m
++++ b/WebDriverAgentLib/Routing/FBHTTPServer.m
+@@ -14,6 +14,7 @@
+ #import "FBResponsePayload.h"
+ #import "FBTCPSocket.h"
+ #import "FBSession.h"
++#import "FBIPhoneUseAuth.h"
+ 
+ static NSData *FBCRLFCRLFData(void)
+ {
+@@ -494,7 +495,7 @@ - (BOOL)findHeaderBlockEnd:(out NSRange *)outHeaderEndRange
+     NSString *normalizedName = name.lowercaseString;
+     // RFC 7230 (3.3.3): repeated framing fields are unrecoverable. Last-wins would let an empty
+     // "Transfer-Encoding:" mask an earlier "chunked", and the last Content-Length drive parsing.
+-    if (([normalizedName isEqualToString:@"content-length"] || [normalizedName isEqualToString:@"transfer-encoding"])
++    if (([normalizedName isEqualToString:@"content-length"] || [normalizedName isEqualToString:@"transfer-encoding"] || [normalizedName isEqualToString:@"authorization"])
+         && nil != requestHeaders[normalizedName]) {
+       [self respondBadRequestToClient:client];
+       return nil;
+@@ -570,6 +571,14 @@ - (nullable FBPendingHTTPRequestHeader *)parsedRequestHeaderFromBuffer:(NSMutabl
+   if (nil == requestHeaders) {
+     return nil;
+   }
++  if (!FBIPhoneUseAuthorized(requestHeaders[@"authorization"])) {
++    RouteResponse *unauthorized = [RouteResponse new];
++    unauthorized.statusCode = (HTTPStatusCode)401;
++    [unauthorized setHeader:@"Content-Type" value:@"application/json"];
++    [unauthorized respondWithString:@"{\"value\":{\"error\":\"unauthorized\",\"message\":\"Authentication required\"}}"];
++    [self failClient:client withResponse:unauthorized];
++    return nil;
++  }
+   NSUInteger contentLength = 0;
+   if (![self resolveBodyLength:&contentLength fromHeaderFields:requestHeaders forClient:client]) {
+     return nil;
+diff --git a/WebDriverAgentLib/Routing/FBIPhoneUseAuth.h b/WebDriverAgentLib/Routing/FBIPhoneUseAuth.h
+new file mode 100644
+index 0000000..0e86667
+--- /dev/null
++++ b/WebDriverAgentLib/Routing/FBIPhoneUseAuth.h
+@@ -0,0 +1,21 @@
++#ifndef FBIPhoneUseAuth_h
++#define FBIPhoneUseAuth_h
++#import <Foundation/Foundation.h>
++
++// Fail closed even if a runner was launched without its private environment.
++static BOOL FBIPhoneUseAuthorized(NSString *header)
++{
++  NSString *token = NSProcessInfo.processInfo.environment[@"IPHONE_USE_AUTH_TOKEN"];
++  if (token.length != 64 || header.length != 71) { return NO; }
++  for (NSUInteger i = 0; i < token.length; i++) {
++    unichar c = [token characterAtIndex:i];
++    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { return NO; }
++  }
++  NSString *expected = [@"Bearer " stringByAppendingString:token];
++  unsigned int difference = 0;
++  for (NSUInteger i = 0; i < expected.length; i++) {
++    difference |= (unsigned int)([expected characterAtIndex:i] ^ [header characterAtIndex:i]);
++  }
++  return difference == 0;
++}
++#endif
+diff --git a/WebDriverAgentLib/Routing/FBWebServer.m b/WebDriverAgentLib/Routing/FBWebServer.m
+index af0d82b..eabe032 100644
+--- a/WebDriverAgentLib/Routing/FBWebServer.m
++++ b/WebDriverAgentLib/Routing/FBWebServer.m
+@@ -79,6 +79,7 @@ - (BOOL)startHTTPServer
+   self.server = [[FBHTTPServer alloc] init];
+   [self.server setRouteQueue:dispatch_get_main_queue()];
+   [self.server setDefaultHeader:@"Server" value:@"WebDriverAgent/1.0"];
++  [self.server setDefaultHeader:@"X-iPhone-Use-Security" value:@"usb-auth-v1"];
+   [self.server setDefaultHeader:@"Access-Control-Allow-Origin" value:@"*"];
+   [self.server setDefaultHeader:@"Access-Control-Allow-Headers" value:@"Content-Type, X-Requested-With"];
+ 
+@@ -91,7 +92,7 @@ - (BOOL)startHTTPServer
+   [self registerServerKeyRouteHandlers];
+ 
+   NSRange serverPortRange = FBConfiguration.sharedInstance.bindingPortRange;
+-  NSString *bindingIP = FBConfiguration.sharedInstance.bindingIPAddress;
++  NSString *bindingIP = @"127.0.0.1"; // This build is USB-only, independently of caller settings.
+   if (bindingIP != nil) {
+     [self.server setInterface:bindingIP];
+     [FBLogger logFmt:@"Using custom binding IP address: %@", bindingIP];
+@@ -134,6 +135,7 @@ - (void)initScreenshotsBroadcaster
+   self.screenshotsBroadcaster = [[FBTCPSocket alloc]
+                                  initWithPort:(uint16_t)FBConfiguration.sharedInstance.mjpegServerPort];
+   self.mjpegServer.socket = self.screenshotsBroadcaster;
++  self.screenshotsBroadcaster.interface = @"127.0.0.1";
+   self.screenshotsBroadcaster.delegate = self.mjpegServer;
+   NSError *error;
+   if (![self.screenshotsBroadcaster startWithError:&error]) {
+diff --git a/WebDriverAgentLib/Utilities/FBMjpegServer.m b/WebDriverAgentLib/Utilities/FBMjpegServer.m
+index 0b4a67f..af2a3f9 100644
+--- a/WebDriverAgentLib/Utilities/FBMjpegServer.m
++++ b/WebDriverAgentLib/Utilities/FBMjpegServer.m
+@@ -20,6 +20,7 @@
+ #import "FBImageProcessor.h"
+ #import "FBImageUtils.h"
+ #import "XCUIScreen.h"
++#import "../Routing/FBIPhoneUseAuth.h"
+ 
+ static const NSUInteger MAX_FPS = 60;
+ static const NSTimeInterval FRAME_TIMEOUT = 1.;
+@@ -50,6 +51,7 @@ @interface FBMjpegServer()
+ @property (nonatomic, assign) NSUInteger droppedFramesCount;
+ // Frames submitted but not sent yet, per client. Guarded by @synchronized (self.listeningClients).
+ @property (nonatomic, readonly) NSMapTable<id, NSNumber *> *pendingFrameCounts;
++@property (nonatomic, readonly) NSMapTable<id, NSMutableData *> *authenticationBuffers;
+ 
+ @end
+ 
+@@ -64,6 +66,7 @@ - (instancetype)init
+     _sentFramesCount = 0;
+     _sentBytesCount = 0;
+     _listeningClients = [NSMutableArray array];
++    _authenticationBuffers = [NSMapTable mapTableWithKeyOptions:(NSPointerFunctionsOptions)(NSMapTableObjectPointerPersonality | NSMapTableStrongMemory) valueOptions:(NSPointerFunctionsOptions)NSMapTableStrongMemory];
+     _pendingFrameCounts = [NSMapTable mapTableWithKeyOptions:(NSPointerFunctionsOptions)(NSMapTableObjectPointerPersonality | NSMapTableStrongMemory)
+                                                 valueOptions:(NSPointerFunctionsOptions)NSMapTableStrongMemory];
+     _imageProcessor = [[FBImageProcessor alloc] init];
+@@ -196,13 +199,54 @@ - (void)sendScreenshot:(NSData *)screenshotData {
+ - (void)didClientConnect:(nw_connection_t)newClient
+ {
+   [FBLogger log:@"Got screenshots broadcast client connection"];
+-  // FBTCPSocket already schedules the receive that -client:didReceiveData: relies on below.
++  @synchronized (self.listeningClients) {
++    [self.authenticationBuffers setObject:[NSMutableData data] forKey:newClient];
++  }
++  __weak typeof(self) weakSelf = self;
++  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), self.backgroundQueue, ^{
++    __strong typeof(weakSelf) strongSelf = weakSelf;
++    if (nil == strongSelf) { return; }
++    @synchronized (strongSelf.listeningClients) {
++      if (nil != [strongSelf.authenticationBuffers objectForKey:newClient]) {
++        [strongSelf.authenticationBuffers removeObjectForKey:newClient];
++        nw_connection_cancel(newClient);
++      }
++    }
++  });
+ }
+ 
+ - (void)client:(nw_connection_t)client didReceiveData:(NSData *)data
+ {
+   @synchronized (self.listeningClients) {
+-    if ([self.listeningClients containsObject:client]) {
++    if ([self.listeningClients containsObject:client]) { return; }
++    NSMutableData *buffer = [self.authenticationBuffers objectForKey:client];
++    if (nil == buffer || data.length > 8192 || buffer.length > 8192 - data.length) {
++      [self.authenticationBuffers removeObjectForKey:client];
++      nw_connection_cancel(client);
++      return;
++    }
++    [buffer appendData:data];
++    NSData *separator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
++    NSRange end = [buffer rangeOfData:separator options:0 range:NSMakeRange(0, buffer.length)];
++    if (end.location == NSNotFound) { return; }
++    NSString *headers = [[NSString alloc] initWithData:[buffer subdataWithRange:NSMakeRange(0, end.location)] encoding:NSUTF8StringEncoding];
++    NSArray<NSString *> *lines = [headers componentsSeparatedByString:@"\r\n"];
++    BOOL valid = lines.count > 0 && ([lines[0] isEqualToString:@"GET / HTTP/1.1"] || [lines[0] isEqualToString:@"GET / HTTP/1.0"]);
++    NSString *authorization = nil;
++    for (NSUInteger i = 1; valid && i < lines.count; i++) {
++      NSString *line = lines[i];
++      NSRange colon = [line rangeOfString:@":"];
++      if (colon.location == NSNotFound || colon.location == 0) { valid = NO; break; }
++      NSString *name = [line substringToIndex:colon.location];
++      if ([name rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) { valid = NO; break; }
++      if ([name.lowercaseString isEqualToString:@"authorization"]) {
++        if (authorization != nil) { valid = NO; break; }
++        authorization = [[line substringFromIndex:colon.location + 1] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
++      }
++    }
++    [self.authenticationBuffers removeObjectForKey:client];
++    if (!valid || !FBIPhoneUseAuthorized(authorization)) {
++      nw_connection_cancel(client);
+       return;
+     }
+   }
+@@ -220,6 +264,7 @@ - (void)didClientDisconnect:(nw_connection_t)client
+   @synchronized (self.listeningClients) {
+     [self.listeningClients removeObject:client];
+     [self.pendingFrameCounts removeObjectForKey:client];
++    [self.authenticationBuffers removeObjectForKey:client];
+   }
+   // Nothing is owed to a client that stopped listening, so its socket can go right away.
+   nw_connection_cancel(client);

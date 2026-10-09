@@ -1,13 +1,24 @@
 // A single owned USB connection to WDA's independent MJPEG port. stdout is JPEG
 // stream bytes only; this program never binds a listener or touches XCTest.
 import http from 'node:http';
+import fs from 'node:fs';
 
 // Device-library diagnostics must never corrupt the binary pipe or expose IDs.
 for (const method of ['log', 'info', 'warn', 'error', 'debug']) console[method] = () => {};
-const [udid, portArgument = '9100'] = process.argv.slice(2);
+const [udid, portArgument = '9100', tokenPath] = process.argv.slice(2);
 if (!/^[A-Za-z0-9-]{8,64}$/.test(udid ?? '') || !/^\d+$/.test(portArgument)) process.exit(1);
 const devicePort = Number(portArgument);
 if (!Number.isInteger(devicePort) || devicePort < 1024 || devicePort > 65535) process.exit(1);
+let token;
+try {
+  const descriptor = fs.openSync(tokenPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const info = fs.fstatSync(descriptor);
+    if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.size !== 64) throw new Error();
+    token = fs.readFileSync(descriptor, 'ascii');
+    if (!/^[a-f0-9]{64}$/.test(token)) throw new Error();
+  } finally { fs.closeSync(descriptor); }
+} catch { process.exit(1); }
 
 let socket, request, response, agent;
 let stopping = false;
@@ -39,7 +50,7 @@ try {
     agent = new http.Agent({keepAlive: false});
     agent.createConnection = () => socket;
     request = http.request({host: '127.0.0.1', port: devicePort, path: '/',
-      method: 'GET', agent, headers: {Accept: 'multipart/x-mixed-replace', Connection: 'close'}}, incoming => {
+      method: 'GET', agent, headers: {Accept: 'multipart/x-mixed-replace', Connection: 'close', Authorization: `Bearer ${token}`}}, incoming => {
       response = incoming;
       clearTimeout(startup);
       if (incoming.statusCode !== 200) { stop(1); return; }

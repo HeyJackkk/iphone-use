@@ -1,7 +1,9 @@
 import net from 'node:net';
+import fs from 'node:fs';
+import path from 'node:path';
 import iosDevice from 'appium-ios-device';
 
-const [udid, localArgument = '18100', deviceArgument = '8100'] = process.argv.slice(2);
+const [udid, localArgument = '18100', deviceArgument = '8100', socketPath] = process.argv.slice(2);
 if (!/^[A-Za-z0-9-]{8,64}$/.test(udid ?? '')) throw new Error('Provide a valid device UDID.');
 function port(value) {
   if (!/^\d+$/.test(value)) throw new Error('Ports must be integers.');
@@ -11,6 +13,9 @@ function port(value) {
 }
 const localPort = port(localArgument);
 const devicePort = port(deviceArgument);
+if (!socketPath || !path.isAbsolute(socketPath)) throw new Error('A private control socket is required.');
+const parent = fs.lstatSync(path.dirname(socketPath));
+if (!parent.isDirectory() || parent.uid !== process.getuid() || (parent.mode & 0o077)) throw new Error('Control socket directory must be private to its owner.');
 const sockets = new Set();
 let stopping = false;
 const server = net.createServer(async client => {
@@ -33,7 +38,10 @@ const server = net.createServer(async client => {
   }
 });
 server.on('error', error => { console.error(`USB forward failed: ${error.message}`); process.exitCode = 1; stop(); });
-server.listen(localPort, '127.0.0.1', () => console.log(`WDA USB forward listening at 127.0.0.1:${localPort}`));
+server.listen(socketPath, () => {
+  fs.chmodSync(socketPath, 0o600);
+  console.log(`WDA private USB forward ready (logical port ${localPort})`);
+});
 function stop() {
   if (stopping) return;
   stopping = true;

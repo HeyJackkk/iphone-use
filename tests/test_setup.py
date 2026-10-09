@@ -203,7 +203,7 @@ class SetupTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("build successfully", result["error"])
 
-    def test_start_reuses_ready_external_service_without_spawning(self):
+    def test_start_does_not_reuse_ready_service_without_secure_build(self):
         self.configure()
         with patch.object(self.manager, "_source", return_value=Path(self.temp.name)), \
              patch.object(self.manager, "_probe_status", return_value={"ready": True, "reachable": True}), \
@@ -211,7 +211,8 @@ class SetupTests(unittest.TestCase):
              patch.object(wda_setup.shutil, "which", return_value="/usr/bin/xcodebuild"), \
              patch.object(self.manager, "_create_job") as create:
             result = self.manager.setup("start", wait_seconds=0)
-        self.assertTrue(result["already_ready"])
+        self.assertFalse(result["ok"])
+        self.assertIn("build", result["error"])
         create.assert_not_called()
 
     def prepare_start(self, port):
@@ -220,6 +221,7 @@ class SetupTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         wda_setup._write_json(self.manager.state_dir / "build.json", {
             "config_fingerprint": wda_setup._fingerprint(self.manager.config), "commit": wda_setup.WDA_COMMIT,
+            **wda_setup.security_marker(self.manager.state_dir),
         })
 
     def start_without_device(self):
@@ -234,41 +236,28 @@ class SetupTests(unittest.TestCase):
             result = self.manager.setup("start", wait_seconds=0)
         return result, create
 
-    def test_start_reuses_port_after_closed_forward_connection(self):
-        listener = socket.socket()
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-        listener.listen(1)
-        client = socket.create_connection(("127.0.0.1", port), timeout=2)
-        accepted, _ = listener.accept()
-        # The server side closes first and owns TIME_WAIT, as a stopped USB
-        # forward may do. A bare bind reproduces the original false rejection.
-        accepted.close()
-        self.assertEqual(client.recv(1), b"")
-        client.close()
-        listener.close()
-        with socket.socket() as bare_probe:
-            with self.assertRaises(OSError):
-                bare_probe.bind(("127.0.0.1", port))
-        self.prepare_start(port)
-        result, create = self.start_without_device()
-        self.assertTrue(result["ok"], result)
-        create.assert_called_once()
-
-    def test_start_refuses_existing_listener_without_stopping_it(self):
+    def test_start_ignores_unrelated_tcp_port(self):
         with socket.socket() as listener:
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
+            listener.bind(('127.0.0.1', 0))
             listener.listen(1)
-            self.prepare_start(port)
+            self.prepare_start(listener.getsockname()[1])
             result, create = self.start_without_device()
-            self.assertFalse(result["ok"])
-            self.assertIn("Local forward port is occupied", result["error"])
-            self.assertTrue(any("do not kill unrelated" in hint for hint in result["next_steps"]))
+            self.assertTrue(result['ok'], result)
+            create.assert_called_once()
+
+    def test_start_refuses_existing_private_listener_without_stopping_it(self):
+        self.prepare_start(18100)
+        path = wda_setup.control_socket(self.manager.state_dir, self.manager.port)
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(path))
+            listener.listen(1)
+            with patch.object(self.manager, '_listener_pids', return_value=[os.getpid()]):
+                result, create = self.start_without_device()
+            self.assertFalse(result['ok'])
+            self.assertIn('socket is occupied', result['error'])
             create.assert_not_called()
-            with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(path))
                 accepted, _ = listener.accept()
                 accepted.close()
 
@@ -323,11 +312,14 @@ class SetupTests(unittest.TestCase):
         (source / "WebDriverAgent.xcodeproj").mkdir(parents=True)
         (source / "WebDriverAgent.xcodeproj/project.pbxproj").write_text("fixture")
         git = bin_dir / "git"
-        git.write_text(f"#!{sys.executable}\nimport sys\nif 'rev-parse' in sys.argv: print({wda_setup.WDA_COMMIT!r})\n")
+        git.write_text(f"#!{sys.executable}\nimport sys,tarfile,io\nif 'rev-parse' in sys.argv: print({wda_setup.WDA_COMMIT!r})\n"
+                       "if 'archive' in sys.argv:\n with tarfile.open(fileobj=sys.stdout.buffer,mode='w|') as tar:\n  data=b'fixture'; item=tarfile.TarInfo('WebDriverAgent.xcodeproj/project.pbxproj'); item.size=len(data); tar.addfile(item,io.BytesIO(data))\n")
         xcode = bin_dir / "xcodebuild"
         xcode.write_text(f"#!{sys.executable}\nimport subprocess, sys, time\nfrom pathlib import Path\n"
                          "child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(120)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
-                         "Path('child.pid').write_text(str(child.pid))\ntime.sleep(0.15)\n")
+                         "Path('child.pid').write_text(str(child.pid))\n"
+                         f"products=Path({str(self.manager.state_dir / 'derived_data/Build/Products')!r}); products.mkdir(parents=True,exist_ok=True)\n"
+                         "import plistlib; (products/'fixture.xctestrun').write_bytes(plistlib.dumps({'Runner':{'TestBundlePath':'fixture'}}))\ntime.sleep(0.15)\n")
         git.chmod(0o700)
         xcode.chmod(0o700)
         config = {"udid": "00008150-ABCDEF0123456789", "team_id": "ABCDE12345", "bundle_id": "com.example.runner",
@@ -338,7 +330,7 @@ class SetupTests(unittest.TestCase):
         process.wait(timeout=10)
         job = wda_setup._read_json(self.manager._job_path(result["job_id"]))
         self.assertEqual(job["state"], "succeeded", job.get("error"))
-        child_pid = int((source / "child.pid").read_text())
+        child_pid = int((self.manager._secure_source() / "child.pid").read_text())
         descendant = wda_setup._run(["ps", "-p", str(child_pid), "-o", "stat="], timeout=2)
         self.assertTrue(not descendant["stdout"].strip() or descendant["stdout"].strip().startswith("Z"))
 
@@ -353,16 +345,18 @@ class SetupTests(unittest.TestCase):
         config = self.manager.config
         wda_setup._write_json(self.manager.state_dir / "build.json", {
             "config_fingerprint": wda_setup._fingerprint(config), "commit": wda_setup.WDA_COMMIT,
+            **wda_setup.security_marker(self.manager.state_dir),
         })
         job = self.job()
         job.update(config=config, worker_entrypoint=str(Path(wda_setup.__file__).resolve()), base_url=self.manager.base_url)
         wda_setup._write_json(self.manager._job_path(job["id"]), job)
+        wda_setup.control_socket(self.manager.state_dir, self.manager.port).touch()
         return job
 
     def recovery_run(self, job, listener_pid=23456):
         def run(argv, **kwargs):
             if argv[0] == "lsof":
-                return {"ok": True, "code": 0, "stdout": f"p{listener_pid}\nn127.0.0.1:{self.manager.port}\n", "stderr": ""}
+                return {"ok": True, "code": 0, "stdout": f"p{listener_pid}\nn{wda_setup.control_socket(self.manager.state_dir, self.manager.port)} type=STREAM\n", "stderr": ""}
             if argv[0] == "ps":
                 return {"ok": True, "code": 0, "stdout": f"python {job['worker_entrypoint']} --worker {self.manager.state_dir} {job['id']} {job['owner_token']} --base-url {self.manager.base_url}", "stderr": ""}
             if argv == ["node", "--version"]:
@@ -575,14 +569,16 @@ class SetupTests(unittest.TestCase):
             result = self.manager.recover()
         self.assertEqual(result["recovery"]["state"], "manual")
 
-    def test_listener_ownership_requires_parseable_loopback_process_fields(self):
-        for output, expected in (("p123\nn127.0.0.1:18100\n", [123]), ("p123\nn[::1]:18100\n", [123]),
-                                 ("p123\nn*:18100\n", None), ("n127.0.0.1:18100\n", None), ("pbad\nn127.0.0.1:18100\n", None)):
-            with patch.object(wda_setup, "_run", return_value={"ok": True, "code": 0, "stdout": output, "stderr": ""}):
+    def test_listener_ownership_requires_parseable_private_socket_process_fields(self):
+        path = wda_setup.control_socket(self.manager.state_dir, self.manager.port)
+        path.touch()
+        for output, expected in ((f'p123\nn{path} type=STREAM\n', [123]),
+                                 ('p123\nn*:18100\n', None), (f'n{path}\n', None), (f'pbad\nn{path}\n', None)):
+            with patch.object(wda_setup, '_run', return_value={'ok': True, 'code': 0, 'stdout': output, 'stderr': ''}):
                 self.assertEqual(self.manager._listener_pids(), expected)
-        for value, expected in (({"ok": False, "code": 1, "stdout": "", "stderr": ""}, []),
-                                ({"ok": False, "code": None, "stdout": "", "stderr": "lsof unavailable"}, None)):
-            with patch.object(wda_setup, "_run", return_value=value):
+        for value, expected in (({'ok': False, 'code': 1, 'stdout': '', 'stderr': ''}, []),
+                                ({'ok': False, 'code': None, 'stdout': '', 'stderr': 'lsof unavailable'}, None)):
+            with patch.object(wda_setup, '_run', return_value=value):
                 self.assertEqual(self.manager._listener_pids(), expected)
 
     def recovery_worker_job(self, original):

@@ -24,12 +24,14 @@ class WDAError(Exception):
 
 
 class WDAClient:
-    def __init__(self, base_url="http://127.0.0.1:18100", timeout=15):
+    def __init__(self, base_url="http://127.0.0.1:18100", timeout=15, auth_token=None, socket_path=None):
         parsed = urlsplit(base_url)
         if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1") or parsed.path not in ("", "/") or parsed.username or parsed.query or parsed.fragment:
             raise ValueError("PUA URL must be a local HTTP endpoint; forward USB to loopback first.")
         self.host, self.port = parsed.hostname, parsed.port or 80
         self.timeout, self.connection, self.session_id = timeout, None, None
+        self.auth_token = auth_token
+        self.socket_path = socket_path
         self._settings_session_id, self._settings_error = None, None
         self.records = collections.deque(maxlen=2000)
 
@@ -80,11 +82,28 @@ class WDAClient:
         try:
             if self.connection is None:
                 self.connection = http.client.HTTPConnection(self.host, self.port, timeout=budget)
+                if self.socket_path is not None:
+                    # The private directory authenticates the local peer before a
+                    # credential is sent; another OS account cannot impersonate
+                    # a WDA listener by racing to bind a public localhost port.
+                    def connect():
+                        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        peer.settimeout(budget)
+                        try:
+                            peer.connect(str(self.socket_path))
+                        except OSError:
+                            peer.close()
+                            raise
+                        self.connection.sock = peer
+                    self.connection.connect = connect
             self.connection.timeout = budget
             if self.connection.sock:
                 self.connection.sock.settimeout(budget)
             body = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
-            self.connection.request(method, path, body, {"Content-Type": "application/json", "Accept": "application/json"})
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if self.auth_token:
+                headers["Authorization"] = "Bearer " + self.auth_token
+            self.connection.request(method, path, body, headers)
             network_socket = self.connection.sock
             remaining = deadline-time.monotonic()
             if remaining <= 0:
@@ -93,6 +112,9 @@ class WDAClient:
                 network_socket.settimeout(remaining)
             response = self.connection.getresponse()
             status = response.status
+            if self.auth_token and response.getheader("X-iPhone-Use-Security") != "usb-auth-v1":
+                self.close()
+                raise WDAError("not_ready", "WDA is not an authenticated USB-only build. Rebuild and restart the owned runner.")
             # read1 returns available buffered bytes instead of waiting for a full
             # body. Resetting the socket timeout to the remaining budget bounds
             # slow/chunked responses too, rather than granting each receive anew.

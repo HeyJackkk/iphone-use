@@ -430,7 +430,9 @@ class ScreenHub:
                 finally:
                     if os.path.exists(temporary):
                         os.unlink(temporary)
-            return [node, str(target), udid, str(port)]
+            from wda_security import auth_token
+            auth_token(self.state_dir)
+            return [node, str(target), udid, str(port), str(self.state_dir / 'auth-token')]
         except (OSError, ValueError, AttributeError):
             return None
 

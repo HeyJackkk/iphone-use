@@ -18,15 +18,18 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from wda_security import auth_token, security_digest, security_marker, control_socket, PATCH, SECURITY_POLICY
 
 WDA_COMMIT = "d17782422d55ff1e5e0ceb74eb1fd509cc0c35b6"
 WDA_VERSION = "16.14.0"
@@ -240,16 +243,18 @@ class SetupManager:
                 os.unlink(name)
 
     def _probe_status(self):
+        from wda_client import WDAClient, WDAError
+        client = WDAClient(self.base_url, timeout=1.5, auth_token=auth_token(self.state_dir),
+                           socket_path=control_socket(self.state_dir, self.port))
         try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            request = urllib.request.Request(self.base_url + "/status", headers={"Accept": "application/json"})
-            with opener.open(request, timeout=1.5) as response:
-                document = json.loads(response.read(1024 * 1024))
+            document = client.request('GET', '/status')
             value = document.get("value", {})
             return {"reachable": True, "ready": value.get("ready") is True, "wda": value,
                     "next_step": "Run MCP session + source smoke check before declaring the phone usable."}
-        except (OSError, ValueError, urllib.error.URLError) as error:
+        except (OSError, ValueError, WDAError) as error:
             return {"reachable": False, "ready": False, "error": _redact(error)}
+        finally:
+            client.close()
 
     def mirroring_running(self):
         if sys.platform != "darwin":
@@ -353,16 +358,15 @@ class SetupManager:
         return owned
 
     def _listener_pids(self, timeout=3):
-        """Return proven loopback listeners, or None when proof is unavailable.
-
-        lsof is used only for ownership evidence; a port number is never a
-        signal target. Refuse wildcard/non-loopback listeners on the same port.
-        """
-        query = _run(["lsof", "-nP", f"-iTCP:{self.port}", "-sTCP:LISTEN", "-Fpn"], timeout=timeout)
+        """Return process ownership evidence for the private Unix socket only."""
+        path = control_socket(self.state_dir, self.port)
+        if not path.exists():
+            return []
+        query = _run(["lsof", "-nP", "-a", "-U", "-Fpn", "--", str(path)], timeout=timeout)
         if not query["ok"]:
             return [] if query.get("code") == 1 and not query.get("stdout") and not query.get("stderr") else None
         current_pid, listeners = None, set()
-        accepted = {f"127.0.0.1:{self.port}", f"[::1]:{self.port}"}
+        accepted = {str(path)}
         for line in query["stdout"].splitlines():
             if line.startswith("p"):
                 try:
@@ -370,7 +374,7 @@ class SetupManager:
                 except ValueError:
                     return None
             elif line.startswith("n"):
-                if not current_pid or current_pid <= 1 or line[1:] not in accepted:
+                if not current_pid or current_pid <= 1 or line[1:].split(' type=')[0] not in accepted:
                     return None
                 listeners.add(current_pid)
         return sorted(listeners) if listeners else None
@@ -395,8 +399,69 @@ class SetupManager:
 
     def _require_build(self, config):
         marker = _read_json(self.state_dir / "build.json", {})
-        if marker.get("config_fingerprint") != _fingerprint(config) or marker.get("commit") != WDA_COMMIT:
+        if (marker.get("config_fingerprint") != _fingerprint(config) or marker.get("commit") != WDA_COMMIT
+                or any(marker.get(key) != value for key, value in security_marker(self.state_dir).items())):
             raise ValueError("Run build successfully for this configuration before start; start uses test-without-building.")
+
+    def _secure_source(self):
+        return self.state_dir / 'runtime' / ('WebDriverAgent-' + security_digest())
+
+    def _prepare_secure_source(self, config):
+        """Recreate from the exact Git tree, never patch the user's original checkout."""
+        source = self._source(config)
+        target = self._secure_source()
+        with tempfile.TemporaryDirectory(prefix='.wda-build-', dir=self.state_dir / 'runtime') as temporary:
+            temporary = Path(temporary)
+            archive = temporary / 'source.tar'
+            with archive.open('wb') as stream:
+                subprocess.run(['git', '-C', str(source), 'archive', WDA_COMMIT], stdout=stream, check=True)
+            tree = temporary / 'source'
+            tree.mkdir(mode=0o700)
+            with tarfile.open(archive) as tar:
+                for member in tar.getmembers():
+                    if (Path(member.name).is_absolute() or '..' in Path(member.name).parts
+                            or not (member.isfile() or member.isdir())):
+                        raise ValueError('Pinned WDA archive contains an unsafe member.')
+                tar.extractall(tree)
+            subprocess.run(['git', 'apply', '--check', str(PATCH)], cwd=tree, check=True)
+            subprocess.run(['git', 'apply', str(PATCH)], cwd=tree, check=True)
+            if target.exists():
+                shutil.rmtree(target)
+            tree.rename(target)
+        return target
+
+    def _secure_test_run(self):
+        return self.state_dir / 'derived_data/Build/Products/iPhoneUse-secure.xctestrun'
+
+    def _prepare_test_run(self):
+        products = self.state_dir / 'derived_data/Build/Products'
+        candidates = [path for path in products.glob('*.xctestrun') if path != self._secure_test_run()]
+        if not candidates:
+            raise ValueError('Build produced no xctestrun; cannot configure private runner authentication.')
+        document = plistlib.loads(max(candidates, key=lambda p: p.stat().st_mtime).read_bytes())
+        targets = []
+        if 'TestConfigurations' in document:
+            for configuration in document['TestConfigurations']:
+                targets.extend(configuration.get('TestTargets', []))
+        else:
+            targets = [value for value in document.values() if isinstance(value, dict) and value.get('TestBundlePath')]
+        if not targets:
+            raise ValueError('Build produced no test target; refusing an unauthenticated runner.')
+        token = auth_token(self.state_dir)
+        for target in targets:
+            environment = target.setdefault('EnvironmentVariables', {})
+            environment.update(IPHONE_USE_AUTH_TOKEN=token, USE_IP='127.0.0.1')
+        path = self._secure_test_run()
+        fd, temporary = tempfile.mkstemp(prefix='.secure-test-', dir=products)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                plistlib.dump(document, stream)
+            os.replace(temporary, path)
+        finally:
+            if Path(temporary).exists():
+                Path(temporary).unlink()
+        return path
 
     @staticmethod
     def _publishing_pid(job):
@@ -586,11 +651,14 @@ class SetupManager:
         return {"ok": job["state"] != "failed", "job_id": job_id, "job": self._job_status(job), "next_step": "Poll setup status with this job_id; do not block MCP waiting for Xcode."}
 
     def _build_command(self, config, action):
-        return ["xcodebuild", "-project", str(Path(config["source_dir"]) / "WebDriverAgent.xcodeproj"),
+        if action == 'test-without-building':
+            return ['xcodebuild', '-xctestrun', str(self._secure_test_run()),
+                    '-destination', 'id=' + config['udid'], action]
+        return ["xcodebuild", "-project", str(self._secure_source() / "WebDriverAgent.xcodeproj"),
                 "-scheme", "WebDriverAgentRunner", "-configuration", "Debug", "-destination", "id=" + config["udid"],
                 "-derivedDataPath", str(self.state_dir / "derived_data"), "-allowProvisioningUpdates",
                 "DEVELOPMENT_TEAM=" + config["team_id"], "CODE_SIGN_STYLE=Automatic", "CODE_SIGN_IDENTITY=Apple Development",
-                "PRODUCT_BUNDLE_IDENTIFIER=" + config["bundle_id"], "USE_PORT=" + str(config["device_port"]), action]
+                "PRODUCT_BUNDLE_IDENTIFIER=" + config["bundle_id"], "USE_PORT=" + str(config["device_port"]), "USE_IP=127.0.0.1", action]
 
     def setup(self, action, **args):
         wait_seconds = args.pop("wait_seconds", 20 if action == "start" else 0)
@@ -696,25 +764,32 @@ class SetupManager:
                 if sys.platform != "darwin" or not shutil.which("xcodebuild"):
                     raise ValueError("Building and starting WDA requires macOS with full Xcode.")
                 if action == "start":
+                    self._require_build(config)
                     healthy = self._probe_status()
                     if healthy["ready"]:
                         return {"ok": True, "already_ready": True, "service": healthy,
                                 "note": "Reusing reachable WDA. This plugin does not own or stop that external service."}
-                    self._require_build(config)
                     if not shutil.which("node") or not shutil.which("npm"):
                         raise ValueError("Install supported Node.js and npm for the USB forward.")
                     if not _node_supported(_run(["node", "--version"])["stdout"]):
                         raise ValueError("USB forwarding requires Node.js 20.19+ / 22.12+ / 24+; update Node.js before start.")
-                    with socket.socket() as probe:
-                        # Node listeners use address reuse. A recently stopped
-                        # owned forward can leave connections in TIME_WAIT;
-                        # match that reuse policy without permitting an active
-                        # listener to be displaced or killed.
-                        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                        try:
-                            probe.bind(("127.0.0.1", config["local_port"]))
-                        except OSError:
-                            raise ValueError("Local forward port is occupied and WDA is not ready. Do not kill unrelated processes; configure another MCP loopback URL or stop an owned job.")
+                    path = control_socket(self.state_dir, self.port)
+                    if path.exists() or path.is_symlink():
+                        info = path.lstat()
+                        listeners = self._listener_pids()
+                        if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
+                                or listeners != []):
+                            raise ValueError("Private control socket is occupied. Stop its owned job; unrelated endpoints are preserved.")
+                        with socket.socket(socket.AF_UNIX) as probe:
+                            probe.settimeout(1)
+                            try:
+                                probe.connect(str(path))
+                            except ConnectionRefusedError:
+                                if path.lstat().st_ino != info.st_ino:
+                                    raise ValueError('Private socket changed during ownership check.')
+                                path.unlink()
+                            else:
+                                raise ValueError('Private control socket is occupied.')
                 return self._create_job(action, config)
         except (ValueError, OSError, KeyError) as error:
             return {"ok": False, "error": _redact(error), "next_steps": _diagnose(str(error))}
@@ -808,8 +883,10 @@ def _worker(state_dir, job_id, owner_token, base_url):
                 # A failed rebuild must not leave an old success marker usable.
                 with contextlib.suppress(FileNotFoundError):
                     (manager.state_dir / "build.json").unlink()
-                run(manager._build_command(config, "build-for-testing"), cwd=source)
-                _write_json(manager.state_dir / "build.json", {"config_fingerprint": _fingerprint(config), "commit": WDA_COMMIT, "built_at": _now()})
+                manager._prepare_secure_source(config)
+                run(manager._build_command(config, "build-for-testing"), cwd=manager._secure_source())
+                manager._prepare_test_run()
+                _write_json(manager.state_dir / "build.json", {"config_fingerprint": _fingerprint(config), "commit": WDA_COMMIT, "built_at": _now(), **security_marker(manager.state_dir)})
             else:
                 if action == "recover":
                     # /status.ready cannot verify XCTest authorization. This
@@ -820,6 +897,10 @@ def _worker(state_dir, job_id, owner_token, base_url):
                     manager._stop_recovery_target(job)
                     job["recovery_phase"] = "starting"
                     _write_json(path, job)
+                # A freshly installed/test-launched runner has no old session.
+                # Preserve phone data; invalidate only this adapter's cache.
+                with contextlib.suppress(FileNotFoundError):
+                    (manager.state_dir / 'session.json').unlink()
                 forward = manager.state_dir / "runtime/forward"
                 forward.mkdir(exist_ok=True, mode=0o700)
                 for name in ("package.json", "package-lock.json", "forward.mjs"):
@@ -829,7 +910,7 @@ def _worker(state_dir, job_id, owner_token, base_url):
                 if _read_json(forward / "installed.json", {}).get("lock_hash") != lock_hash or not (forward / "node_modules/appium-ios-device").is_dir():
                     run(["npm", "ci", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund"], cwd=forward)
                     _write_json(forward / "installed.json", {"lock_hash": lock_hash})
-                forward_child = launch(["node", str(forward / "forward.mjs"), config["udid"], str(config["local_port"]), str(config["device_port"])])
+                forward_child = launch(["node", str(forward / "forward.mjs"), config["udid"], str(config["local_port"]), str(config["device_port"]), str(control_socket(manager.state_dir, config['local_port']))])
                 time.sleep(0.15)
                 if forward_child.poll() is not None:
                     raise RuntimeError("USB forward failed to start; inspect the log tail.")
