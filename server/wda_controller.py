@@ -672,8 +672,8 @@ class PhoneController:
             fail("invalid_argument","Explicit test scope and target are required.")
         locked=self.client.request("GET","/wda/locked").get("value")
         if scope=="device_unlock":
-            if selector is not None or submit or not replace or not re.fullmatch(r"[0-9]{4,12}",text):
-                fail("invalid_argument","Device unlock supports one numeric 4..12 digit passcode; no selector or submit.")
+            if selector is not None or submit or not replace or not re.fullmatch(r"(?:[0-9]{4}|[0-9]{6})",text):
+                fail("invalid_argument","Device unlock supports one numeric 4 or 6 digit passcode; no selector or submit.")
             if locked is False:return {"action_executed":False,"unlocked":True,"ready_required":True}
             # Persist only time, never passcode, across independent MCP processes.
             attempt=self.state_dir/"unlock-attempt.json"
@@ -684,14 +684,16 @@ class PhoneController:
             if self.active_app()!="com.apple.springboard":fail("test_scope_mismatch","Unlock requires the SpringBoard passcode screen.")
             # Preflight every needed digit before entering any. Unsupported/ambiguous UI stops.
             paths={}
-            for digit in set(text):
+            for digit in "0123456789":
                 found=self.query({"type":"Button","name":digit})
                 if found["matches"]!=1:fail("unlock_keypad_unavailable","Open the numeric passcode keypad; no code was entered.")
                 element=self.resolve({"type":"Button","name":digit},found=found)
                 rect=self.element_rect(element)
                 paths[digit]={"x":rect["x"]+rect["width"]/2,"y":rect["y"]+rect["height"]/2}
             attempt.write_text(json.dumps({"time":time.time()}));attempt.chmod(0o600)
-            for digit in text:self.post("/wda/tap/0",paths[digit])
+            for digit in text:
+                if self.client.request("GET","/wda/locked").get("value") is False:break
+                self.post("/wda/tap/0",paths[digit])
             unlocked=self.client.request("GET","/wda/locked").get("value") is False
             return {"action_executed":True,"action_complete":True,"unlocked":unlocked,"ready_required":True,"replay_action":False}
         if locked is not False:fail("phone_locked","Use explicit device_unlock scope for the configured device.")
