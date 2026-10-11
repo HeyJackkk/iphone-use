@@ -79,7 +79,7 @@ SCHEMAS={
  "find":obj({"selector":SEL,"limit":num(1,30,"integer")},("selector",)),
  "tap":obj({"selector":SEL,"x":num(0,10000),"y":num(0,10000),"observation_id":string("Optional ID from this Runtime. Checks app/viewport context, not whole-page pixel equality or age."),**EXPECT}),
  "swipe":obj({"direction":string("Finger movement; up usually reveals later rows. Default up.",enum=["up","down","left","right"]),"region":REGION,"observation_id":string("Optional ID from this Runtime; checks app/viewport context, not numeric/carousel text changes or age."),"expect":SEL,"verify":{**VERIFY,"description":"False: one gesture, no XML checks. True: check anchor movement once; failure returns a screenshot before another action. Numeric refresh is not progress."},"max_attempts":{**num(1,2,"integer"),"default":1,"description":"Legacy limit; even 2 stops after the first unproven gesture for screenshot inspection."},"observe":OBS}),
- "type_text":obj({"selector":SEL,"text":string("Full text to enter. Required with selector unless continue_token is given.",max_length=10000),"allow_newlines":BOOL,"submit":BOOL,"replace":BOOL,"verify":{**VERIFY,"description":"Default false enters the full intended text once without value readback. True checks exact value and stops before submit on mismatch. Secure fields require user takeover."},**EXPECT,"continue_token":string("Token from a result with input_complete=false. Pass it alone to type the rest of that text with its original options.",max_length=64)}),
+ "type_text":obj({"test_authorization":obj({"scope":string("Explicit user test authorization only.",enum=["app","device_unlock"]),"target":string("Bundle ID or device UDID.")},("scope","target")),"selector":SEL,"text":string("Full text to enter. Required with selector unless continue_token is given.",max_length=10000),"allow_newlines":BOOL,"submit":BOOL,"replace":BOOL,"verify":{**VERIFY,"description":"Default false enters the full intended text once without value readback. True checks exact value and stops before submit on mismatch. Credential mode forbids value readback; verify the authenticated outcome separately."},**EXPECT,"continue_token":string("Token from a result with input_complete=false. Pass it alone to type the rest of that text with its original options.",max_length=64)}),
  "press_button":obj({"name":string(enum=["home","volumeup","volumedown"]),"verify":VERIFY,**EXPECT},("name",)),
  "launch_app":obj({"bundle_id":string(),"verify":VERIFY,**EXPECT},("bundle_id",)),
  "wait":obj({"selector":SEL,"timeout_seconds":num(0,20)},("selector",)),
@@ -91,7 +91,7 @@ SCHEMAS={
 }
 # Each batch operation carries the same closed argument schema as its standalone tool.
 BATCH_OPS=["tap","swipe","type_text","launch_app","press_button","wait","observe","scroll_find"]
-SCHEMAS["batch"]=obj({"steps":{"type":"array","minItems":1,"maxItems":20,"items":{"oneOf":[obj({"op":{"type":"string","const":op},"args":SCHEMAS[op]},("op","args")) for op in BATCH_OPS]}}},("steps",))
+SCHEMAS["batch"]=obj({"steps":{"type":"array","minItems":1,"maxItems":20,"items":{"oneOf":[obj({"op":{"type":"string","const":op},"args":({**SCHEMAS[op],"properties":{k:v for k,v in SCHEMAS[op]["properties"].items() if k!="test_authorization"}} if op=="type_text" else SCHEMAS[op])},("op","args")) for op in BATCH_OPS]}}},("steps",))
 SCHEMAS["ready"]["examples"]=[{"recover":True,"screenshot":False}]
 SCHEMAS["screen"]=obj({"action":string("Default open displays the live iPhone sidebar. Pause before password/Face ID takeover; resume only after the user confirms completion.",enum=["open","pause","resume"])})
 SCHEMAS["screen_frame"]=obj({"after_seq":num(0,9007199254740991,"integer"),"last_event_id":num(0,9007199254740991,"integer")})
@@ -106,7 +106,7 @@ DESCRIPTIONS={
  "find":"Query selector fields or a PUA predicate directly without a whole tree. Returns matches in tree order with index, type, texts and rect; this tool's selector documents the fields every selector accepts.",
  "tap":"Tap the element a selector resolves to after on-screen and hittable checks, or tap point coordinates with optional contextual observation_id. If the selector fails, the error returns a screenshot and tap points: tap by x/y in the next call instead of trying other selectors. Executes once optimistically; expect opts into a postcondition. Request tree/both if the next decision needs the new page.",
  "swipe":"One gesture; default verify=false/observe=none skips XML checks. verify=true checks geometry once; failure returns a screenshot even with none/tree, without another gesture. Inspect it before acting; no progress does not prove list completeness.",
- "type_text":"Enter the full intended Unicode text into an editable nonsecure field; no short-text trial or mandatory readback. Omit selector to type into the field that already has keyboard focus, which is how to continue after a selector failed: tap the field by x/y, then type. Send the whole text in one call: long text is typed in bounded requests, and a result with input_complete=false returns a continue_token to pass alone in the next call, after which verify/submit/expect/observe run. verify=true opts into exact readback before submit; expect opts into a page postcondition. Newlines need explicit intent; submit defaults false. Never replay uncertain input/submission.",
+ "type_text":"Enter full Unicode text; omit selector for the focused field. Normal input: continuation token alone, optional verify, explicit multiline intent. Credentials require test_authorization: app + exact foreground bundle ID, or device_unlock + configured UDID with empty numeric keypad open. Credentials: no batch/verify/observe/expect/continuation; preview paused. Check authentication separately, then READY after unlock. Never replay.",
  "press_button":"Home uses the dedicated PUA homescreen endpoint once; default skips foreground polling. verify=true checks SpringBoard for Home, expect can check a page. Volume effects cannot be semantically verified.",
  "launch_app":"Activate once using a resolved bundle ID, optimistically by default. verify=true polls foreground up to five seconds; expect checks the intended page. Request observation for the next decision. Never blindly replay uncertain activation.",
  "wait":"Bounded semantic presence polling for expected target. Presence is a UI postcondition, not proof of business correctness.",
@@ -230,7 +230,9 @@ def validate_semantics(name,args):
         if any(c in args["text"] for c in ("\n","\r")) and not args.get("allow_newlines",False):raise WDAError("newline_requires_intent","Line breaks require explicit multiline intent.")
     if name=="launch_app" and not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+",args["bundle_id"]):raise WDAError("invalid_argument","Use the app's verified bundle ID.")
     if name=="batch":
-        for step in args["steps"]:validate_semantics(step["op"],step["args"])
+        for step in args["steps"]:
+            if "test_authorization" in step["args"]:raise WDAError("invalid_argument","Credential input must be a standalone call, never a batch.")
+            validate_semantics(step["op"],step["args"])
 
 
 def copy_png(directory,data):
@@ -519,6 +521,19 @@ class Runtime:
                 if args.get("reset"):
                     self.client.clear_metrics();self.phone.tool_records.clear();self.responses.clear();self._replied_at=None
                 return result
+            if op=="type_text" and args.get("test_authorization"):
+                authorization=args["test_authorization"]
+                if authorization["scope"]=="device_unlock" and authorization["target"]!=self.setup_manager.config.get("udid"):
+                    raise WDAError("test_scope_mismatch","Authorized device does not match configured device.")
+                self.screen.set_paused(True,reason="authentication")
+                try:
+                    self.client.request("GET","/wda/locked")
+                    if getattr(self.client,"credentials_redacted",False) is not True:
+                        raise WDAError("not_ready","Rebuild and restart the credential-redacted runner first.")
+                    return self.phone.type_text(**args)
+                except WDAError as exc:
+                    # Transport errors can contain submitted request bodies. Never forward them.
+                    raise WDAError("credential_input_failed","Credential operation failed. Inspect authenticated state before any retry.",uncertain=exc.uncertain,details={"cause":exc.code,"action_executed":exc.details.get("action_executed",False) or exc.uncertain,"replay_action":False}) from None
             if op in ("tap","swipe","type_text","launch_app","press_button","batch","scroll_find","collect_list"):
                 if self.client.request("GET","/wda/locked").get("value") is not False:raise WDAError("phone_locked","Unlock the iPhone yourself before operations; observe again afterward.")
             return getattr(self.phone,op)(**args)
@@ -621,7 +636,7 @@ INSTRUCTIONS=(
  "Execute routine actions optimistically: observe=none and verify=false are defaults, verified=false/verification_deferred=true is normal and does not require a separate verification call. If the next decision needs the resulting page, request observe=tree/both in the action and inspect previous success while planning that next step. "
  "Chain known steps in batch; do not batch speculative repeated swipes toward an unknown target. Inspect the next page first, using a screenshot when tree truncation hides the boundary. explicit expect/verify opts into checking key outcomes. Send long text whole: when type_text returns input_complete=false, call it again with only continue_token; a batch stopped by input_continues or time_budget continues from stopped_at. "
  "Verify final critical results before reporting completion. Retry or replan only after observing a definite failure; never replay uncertain input/submission or an already executed multi-step operation wholesale. No_scroll_progress from explicit verification does not prove empty/complete data. "
- "For password, PIN, unlock-code or OTP pages follow the authentication skill: explicit test authorization plus user-provided or designated test credentials permits automated input through supported tools. Do not repeatedly require manual authentication for that authorized test. Pause preview during credential entry, do not echo secrets, and verify the authenticated outcome. Current SecureTextField/phone_locked guards and absence of an unlock tool are technical limitations; do not bypass them with raw WDA calls. Real biometric or personal-confirmation steps, missing authorization/credentials, unsupported tools, or user-selected manual authentication require user takeover: pause phone calls, use the host question tool with first option exactly 已完成继续, and wait for the actual answer. Resume preview after successful automatic authentication, or after explicit manual completion; device unlock still requires READY. Never treat READY as App login success. "
+ "For password, PIN, unlock-code or OTP pages follow the authentication skill: explicit test authorization plus user-provided or designated test credentials permits automated input through supported tools. Do not repeatedly require manual authentication for that authorized test. Pause preview during credential entry, do not echo secrets, and verify the authenticated outcome. Use pua_type_text test_authorization with scope app and exact bundle ID, or device_unlock and configured UDID. This opt-in supports secure fields and numeric passcode keypad; no raw WDA bypass. Credential calls forbid observation/readback and keep preview paused; inspect authentication outcome separately, then resume. Device unlock is one attempt with a cooldown and requires READY afterward. Real biometric or personal-confirmation steps, missing authorization/credentials, unsupported tools, or user-selected manual authentication require user takeover: pause phone calls, use the host question tool with first option exactly 已完成继续, and wait for the actual answer. Resume preview after successful automatic authentication, or after explicit manual completion; device unlock still requires READY. Never treat READY as App login success. "
  "Operation action_complete/verified fields do not mean the user's entire task is complete. Track all deliverables, give commentary progress and continue tools while work remains; final only after completion or a concrete blocker. For an unavailable MCP binding use the skill's direct Runtime fallback with the same operation lock."
 )
 

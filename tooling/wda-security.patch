@@ -65,15 +65,16 @@ diff --git a/WebDriverAgentLib/Routing/FBWebServer.m b/WebDriverAgentLib/Routing
 index af0d82b..eabe032 100644
 --- a/WebDriverAgentLib/Routing/FBWebServer.m
 +++ b/WebDriverAgentLib/Routing/FBWebServer.m
-@@ -79,6 +79,7 @@ - (BOOL)startHTTPServer
+@@ -79,6 +79,8 @@ - (BOOL)startHTTPServer
    self.server = [[FBHTTPServer alloc] init];
    [self.server setRouteQueue:dispatch_get_main_queue()];
    [self.server setDefaultHeader:@"Server" value:@"WebDriverAgent/1.0"];
 +  [self.server setDefaultHeader:@"X-iPhone-Use-Security" value:@"usb-auth-v1"];
++  [self.server setDefaultHeader:@"X-iPhone-Use-Credentials" value:@"redacted-v1"];
    [self.server setDefaultHeader:@"Access-Control-Allow-Origin" value:@"*"];
    [self.server setDefaultHeader:@"Access-Control-Allow-Headers" value:@"Content-Type, X-Requested-With"];
  
-@@ -91,7 +92,7 @@ - (BOOL)startHTTPServer
+@@ -91,7 +93,7 @@ - (BOOL)startHTTPServer
    [self registerServerKeyRouteHandlers];
  
    NSRange serverPortRange = FBConfiguration.sharedInstance.bindingPortRange;
@@ -183,3 +184,25 @@ index 0b4a67f..af2a3f9 100644
    }
    // Nothing is owed to a client that stopped listening, so its socket can go right away.
    nw_connection_cancel(client);
+
+diff --git a/WebDriverAgentLib/Categories/XCUIElement+FBTyping.m b/WebDriverAgentLib/Categories/XCUIElement+FBTyping.m
+--- a/WebDriverAgentLib/Categories/XCUIElement+FBTyping.m
++++ b/WebDriverAgentLib/Categories/XCUIElement+FBTyping.m
+@@ -26,15 +26,13 @@
+ 
+ BOOL FBTypeText(NSString *text, NSUInteger typingSpeed, NSError **error)
+ {
+-  NSString *name = text.length <= MAX_TEXT_ABBR_LEN
+-    ? [NSString stringWithFormat:@"Type '%@'", text]
+-    : [NSString stringWithFormat:@"Type '%@…'", [text substringToIndex:MAX_TEXT_ABBR_LEN]];
++  NSString *name = @"Type [redacted]";
+   XCSynthesizedEventRecord *eventRecord = [[XCSynthesizedEventRecord alloc] initWithName:name];
+   XCPointerEventPath *ep = [[XCPointerEventPath alloc] initForTextInput];
+   [ep typeText:text
+       atOffset:0.0
+    typingSpeed:typingSpeed
+-  shouldRedact:NO];
++  shouldRedact:YES];
+   [eventRecord addPointerEventPath:ep];
+   return [FBXCTestDaemonsProxy synthesizeEventWithRecord:eventRecord error:error];
+ }

@@ -112,6 +112,7 @@ class WDAClient:
                 network_socket.settimeout(remaining)
             response = self.connection.getresponse()
             status = response.status
+            self.credentials_redacted = response.getheader("X-iPhone-Use-Credentials") == "redacted-v1"
             if self.auth_token and response.getheader("X-iPhone-Use-Security") != "usb-auth-v1":
                 self.close()
                 raise WDAError("not_ready", "WDA is not an authenticated USB-only build. Rebuild and restart the owned runner.")

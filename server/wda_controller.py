@@ -70,7 +70,7 @@ def action_result(function):
                 if function.__name__=="swipe":
                     error.details.setdefault("attempts",self.accepted_actions-before)
                 error.details.setdefault("verification_required","At least one phone action was accepted before the error. Read actual state; do not automatically replay the operation.")
-            self.switch_to_coordinates(error,typing=function.__name__=="type_text")
+            if not kwargs.get("test_authorization"):self.switch_to_coordinates(error,typing=function.__name__=="type_text")
             raise
     return wrapped
 
@@ -630,7 +630,11 @@ class PhoneController:
             raise
 
     @action_result
-    def type_text(self,selector=None,text=None,allow_newlines=False,submit=False,replace=True,observe="none",verify=False,expect=None,continue_token=None):
+    def type_text(self,selector=None,text=None,allow_newlines=False,submit=False,replace=True,observe="none",verify=False,expect=None,continue_token=None,test_authorization=None):
+        if test_authorization is not None:
+            if continue_token is not None or allow_newlines or observe!="none" or verify or expect is not None:
+                fail("invalid_argument","Credential input forbids continuation, readback and observation.")
+            return self.type_credentials(selector,text,submit,replace,test_authorization)
         if continue_token is not None:
             if selector is not None or text is not None or expect is not None or allow_newlines or submit or not replace or verify or observe!="none":
                 fail("invalid_argument","continue_token resumes the earlier call with the options given there; pass it alone.",action_executed=False)
@@ -657,6 +661,57 @@ class PhoneController:
             self.post(path+"/clear",{})
         return self.type_pieces({"path":path,"focused":selector is None,"pieces":split_text(text,self.typing_piece),"typed":0,"total":len(text),
                                  "expected":text if replace else str(before)+text,"verify":verify,"submit":submit,"expect":expect,"observe":observe})
+
+    def type_credentials(self,selector,text,submit,replace,authorization):
+        """Explicit per-call test scope; no value readback, continuation or screenshots."""
+        self.pending_input=None
+        if not isinstance(text,str) or not 1<=len(text)<=200 or any(c in text for c in "\x00\n\r"):
+            fail("invalid_argument","Credential text must have 1..200 characters without control separators.")
+        scope=authorization.get("scope");target=authorization.get("target")
+        if scope not in ("app","device_unlock") or not isinstance(target,str) or not target:
+            fail("invalid_argument","Explicit test scope and target are required.")
+        locked=self.client.request("GET","/wda/locked").get("value")
+        if scope=="device_unlock":
+            if selector is not None or submit or not replace or not re.fullmatch(r"[0-9]{4,12}",text):
+                fail("invalid_argument","Device unlock supports one numeric 4..12 digit passcode; no selector or submit.")
+            if locked is False:return {"action_executed":False,"unlocked":True,"ready_required":True}
+            # Persist only time, never passcode, across independent MCP processes.
+            attempt=self.state_dir/"unlock-attempt.json"
+            try:last=float(json.loads(attempt.read_text())["time"])
+            except FileNotFoundError:last=0
+            except (ValueError,KeyError,TypeError):fail("unlock_cooldown","Invalid unlock attempt record; inspect it manually.")
+            if time.time()-last<120:fail("unlock_cooldown","Wait at least 120 seconds and inspect device before another authorized attempt.")
+            if self.active_app()!="com.apple.springboard":fail("test_scope_mismatch","Unlock requires the SpringBoard passcode screen.")
+            # Preflight every needed digit before entering any. Unsupported/ambiguous UI stops.
+            paths={}
+            for digit in set(text):
+                found=self.query({"type":"Button","name":digit})
+                if found["matches"]!=1:fail("unlock_keypad_unavailable","Open the numeric passcode keypad; no code was entered.")
+                element=self.resolve({"type":"Button","name":digit},found=found)
+                rect=self.element_rect(element)
+                paths[digit]={"x":rect["x"]+rect["width"]/2,"y":rect["y"]+rect["height"]/2}
+            attempt.write_text(json.dumps({"time":time.time()}));attempt.chmod(0o600)
+            for digit in text:self.post("/wda/tap/0",paths[digit])
+            unlocked=self.client.request("GET","/wda/locked").get("value") is False
+            return {"action_executed":True,"action_complete":True,"unlocked":unlocked,"ready_required":True,"replay_action":False}
+        if locked is not False:fail("phone_locked","Use explicit device_unlock scope for the configured device.")
+        if self.active_app()!=target:fail("test_scope_mismatch","Foreground app differs from authorized target.")
+        if selector is None:
+            found=self.client.session("GET","/element/active")
+            ident=found.get(ELEMENT_KEY) or found.get("ELEMENT")
+            if not isinstance(ident,str):fail("no_focused_field","Focus the credential field first.")
+            path="/element/"+quote(ident,safe="")
+            kind=found.get("type") or self.client.session("GET",path+"/attribute/type")
+        else:
+            element=self.resolve(selector,editable=False);path=element["path"]
+            kind=element.get("type") or self.client.session("GET",path+"/attribute/type")
+        if kind not in EDITABLE+("XCUIElementTypeSecureTextField",):fail("not_editable","Credential target must be an editable field.")
+        if self.active_app()!=target:fail("test_scope_mismatch","App changed while resolving credential field.")
+        if selector is not None:self.post(path+"/click",{})
+        if replace:self.post(path+"/clear",{})
+        self.post(path+"/value",{"text":text,"frequency":self.typing_frequency},timeout=request_timeout(len(text),self.typing_frequency,getattr(self.client,"timeout",15)))
+        if submit:self.post("/wda/keys",{"value":["\n"]})
+        return {"action_executed":True,"action_complete":True,"input_complete":True,"submitted":submit,"exact_readback":False,"verified":False,"authentication_verification_required":True}
 
     def focused_field(self):
         """The editable element that has keyboard focus, for typing after a coordinate tap."""
