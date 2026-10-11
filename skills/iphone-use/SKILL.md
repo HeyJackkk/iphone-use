@@ -1,6 +1,6 @@
 ---
 name: iphone-use
-description: 通过 PUA（Phone Use Agent）MCP 工具高效操作真实 iPhone；本对话首次使用先直接 setup 检查并启动服务，再取得 READY，服务未启动时沿 setup 启动流程继续。默认乐观执行导航、点击、输入和滚动，在下一步观察时顺带判断进度，只对关键最终结果显式验收；指导 App 查找、列表采集、手机屏幕侧边栏及密码或 Face ID 认证接管。
+description: 通过 PUA 操作 USB 连接的真实 iPhone，包括 App 导航、读取、点击、输入、列表采集和屏幕预览；支持已授权测试凭据输入，连接初始化使用 iphone-use-setup。
 ---
 
 # 用 PUA 完成 iPhone 任务
@@ -23,7 +23,7 @@ description: 通过 PUA（Phone Use Agent）MCP 工具高效操作真实 iPhone�
 
 READY 关联手机屏幕侧边栏，宿主支持时默认打开或复用本聊天已有面板；重复 setup / 恢复通道、暂停 / 恢复预览沿用同一个 widget。已有面板时直接继续，不为刷新再调用屏幕打开工具；需要重新打开已关闭的面板时调用一次 `pua_screen()`，不要为打开画面重复 READY。用户要求“先打开 widget 让我看”时先打开，再继续初始化与已授权任务；只有明确要求等他确认再操作时才等待。widget 顶部显示机型和 Live 状态，底部的刷新 / 主屏幕 / 截图三个按钮只供用户自己点击，不是模型的工具：不要调用仅供 App 使用的 `pua_screen_frame` 和 `pua_screen_action`，不要为刷新预览增加轮询、截图或 observe。用户点过主屏幕后页面会变，按下一次观察到的实际状态继续。画面留空、光效或 cursor 都不证明 READY、动作成功或任务完成，也不是模型观察。预览问题按 [屏幕通道说明](references/screen.md) 排查，不为它反复恢复控制通道。
 
-App 实际要求密码、PIN、验证码、Face ID / Touch ID，或手机需要用户解锁时，按 [认证接管与恢复](references/authentication.md) 等用户完成。App 认证先 `pua_screen(action="pause")`；`phone_locked` 已自动暂停为 `device_locked`，不要再用显式 pause 覆盖原因。必须调用宿主提问工具（Default 优先 `functions.request_user_input_async`），首个选项固定「已完成继续」，第二个可为「暂时无法完成」。异步返回 / 预选不是用户答复；接管期间暂停手机动作、读取和截图，不索取凭据。实际完成通知后，App 认证或旧版未知暂停先 `pua_screen(action="resume")` 再取新观察；设备解锁则重验 READY，成功时仅自动解除同一次锁屏暂停。READY 的 `preview.paused` / `pause_reason` 说明预览状态；不能把 READY 成功当成 App 认证已完成。根据新状态继续剩余工作。
+App 出现密码、PIN、解锁码、验证码或生物识别页面时，按 [测试认证与用户接管](references/authentication.md) 先判断授权和工具能力。已授权的自动化测试可使用用户提供或指定来源的测试凭据，不因认证字段重复要求手动操作。自动认证成功后直接继续已授权测试；只有授权或凭据缺失、工具不支持、用户选择手动或系统要求本人操作时，才暂停预览并请求用户接管。`SecureTextField` 和 `phone_locked` 的当前运行时限制仍需如实处理。READY 不代表 App 已登录；手动接管仍需等待实际完成通知后再恢复并观察新页面。
 
 ## 按下一步需要选择观察
 
@@ -75,7 +75,7 @@ for (const block of result.content ?? []) {
 
 ## 输入与发送
 
-直接用 `pua_type_text(selector, text)` 一次给出用户需要的完整内容，不先写测试短文本或 ASCII，也不自行拆段。selector 找不到输入框时不换写法重试：用坐标点中输入框，再调用不带 selector 的 `pua_type_text(text=...)` 向当前焦点输入。默认 `replace=true, allow_newlines=false, submit=false, verify=false, observe="none"`；普通搜索、筛选等输入后可接着做下一步，未知下一页面时在本次动作返回观察并顺带判断。需要保留已有草稿时按当前内容决定替换或追加；关键最终文本可显式 `verify=true` 核对完整字段。密码、手机解锁码和验证码由用户输入。
+直接用 `pua_type_text(selector, text)` 一次给出用户需要的完整内容，不先写测试短文本或 ASCII，也不自行拆段。selector 找不到输入框时不换写法重试：用坐标点中输入框，再调用不带 selector 的 `pua_type_text(text=...)` 向当前焦点输入。默认 `replace=true, allow_newlines=false, submit=false, verify=false, observe="none"`；普通搜索、筛选等输入后可接着做下一步，未知下一页面时在本次动作返回观察并顺带判断。需要保留已有草稿时按当前内容决定替换或追加；关键最终文本可显式 `verify=true` 核对完整字段。已授权的测试密码、PIN、解锁码和验证码按 [测试认证与用户接管](references/authentication.md) 处理，工具支持时可自动输入；仅在缺少授权或凭据、工具不支持或需本人操作时请求接管。
 
 长文本由工具分段输入。结果为 `input_complete=false` 时文本还没输完：只带返回的 `continue_token` 再调用一次 `pua_type_text`，不重发文本、不附其他参数，期间不要点击、滑动或切页；全部输完后原调用里的 verify / submit / expect / observe 才执行。续传失效（`input_continuation_expired`）时不会输入任何内容，先读取字段的实际文字，再用 `replace=false` 只补缺少的部分。输入中途报错附带 `characters_confirmed`，同样先回读，不整段重输。
 

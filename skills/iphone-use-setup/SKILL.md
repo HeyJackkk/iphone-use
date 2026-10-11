@@ -42,7 +42,7 @@ description: 配置 PUA（Phone Use Agent），在用户自己的 iPhone 上安�
 
 READY 已返回设备、会话、视口和当前 observation，复用这些信息准备下一步。不要紧接着重复读树或为每项任务增加导航预检；只有具体诊断确实需要时才在无副作用页面测试。常规导航默认 observe=none、verify=false；下一步需要未知页面信息时，在本次动作返回 tree / screenshot / both，不另加验证回合。最终关键操作显式 expect / verify 或一次终态读取。
 
-通道 READY 后，目标 App 仍可能要求密码、验证码或 Face ID。按 [认证接管与恢复](../iphone-use/references/authentication.md)，先调用 `pua_screen(action="pause")` 停止预览并清空画面，再按该参考调用提问工具提示用户在 iPhone 上完成，首个选项「已完成继续」；接管期间暂停手机调用。收到用户实际选择「已完成继续」或明确完成通知后调用 `pua_screen(action="resume")`，重新观察 App 和目标页。App 认证不是 PUA 故障，不为此重复 build / start / recover；手机真正锁屏或通道中断时才恢复 READY。
+通道 READY 后，目标 App 仍可能需要认证。按 [测试认证与用户接管](../iphone-use/references/authentication.md) 区分已授权的测试凭据输入和确需用户的接管，不因密码或验证码页面一律停止测试。自动认证成功后继续已授权工作；手动接管才暂停手机调用并等待实际完成通知。当前工具仍不支持 `SecureTextField` 输入及锁屏解锁码操作，这是运行时能力限制，不是技能禁止所有测试认证。App 认证本身不是 PUA 故障，不为此重复 build/start/recover。
 
 断线、重启、停止测试进程或 USB 转发退出后，按上面的未启动流程查询 status 并复用已有工作 / 构建；只有具体缺项需要时才调用 doctor，按缺失层恢复连接或 start，最后重新 READY。用户接管手机后重新观察当前 App，不继续使用接管前的坐标或猜测原页面。
 
