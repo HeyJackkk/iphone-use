@@ -397,22 +397,54 @@ test('same-size frames avoid repeated layout reads and duplicate sequences avoid
   assert.equal(h.layoutReads, initialLayouts + 2);
 });
 
-test('no frame keeps a fitted black-screen chassis and disconnected label', async () => {
+test('startup waits for the first frame with a connecting placeholder', async () => {
   const h = await harness();
   assert.equal(h.elements.device.hidden, false);
   assert.equal(h.elements.screen.hidden, false);
   assert.equal(h.elements.image.hidden, true);
   h.app.ontoolresult({ structuredContent: preview({ frame_available: false }) });
-  assert.equal(h.elements['empty-state-text'].textContent, '未连接');
+  assert.equal(h.elements.app.dataset.live, 'connecting');
+  assert.equal(h.elements['empty-state'].dataset.state, 'connecting');
+  assert.equal(h.elements['empty-state-text'].textContent, '正在连接');
   assert.equal(h.elements['empty-state'].hidden, false);
   assert.ok(parseFloat(h.elements.device.style.height) <= h.stageSize.height);
   h.app.ontoolresult({ structuredContent: preview({ frame: frame(1), frame_available: true }) });
   assert.equal(h.elements['empty-state'].hidden, true);
   assert.equal(h.elements.image.hidden, false);
+  assert.equal(h.elements.app.dataset.live, 'live');
   // A transient gap retains actual pixels; the placeholder must not replace them.
   h.app.ontoolresult({ structuredContent: preview({ frame_available: false }) });
   assert.equal(h.elements['empty-state'].hidden, true);
   assert.equal(h.elements.image.hidden, false);
+  assert.equal(h.elements.app.dataset.live, 'offline');
+});
+
+test('startup poll failures keep loading until a frame arrives', async () => {
+  let available = false;
+  const h = await harness({ reply: async () => available
+    ? { structuredContent: preview({ frame: frame(1), frame_available: true }) }
+    : { isError: true } });
+  for (let i = 0; i < 5; i++) await h.tick();
+  assert.equal(h.elements.app.dataset.live, 'connecting');
+  assert.equal(h.elements['empty-state'].dataset.state, 'connecting');
+  available = true;
+  await h.tick();
+  assert.equal(h.elements.app.dataset.live, 'live');
+  assert.equal(h.elements['empty-state'].hidden, true);
+});
+
+test('host connection retries keep the startup loading placeholder', async () => {
+  let connected = false;
+  const h = await harness({ connectReply: async () => {
+    if (!connected) throw new Error('host is starting');
+  } });
+  for (let i = 0; i < 3; i++) await h.tick();
+  assert.equal(h.elements.app.dataset.live, 'connecting');
+  assert.equal(h.elements['empty-state'].dataset.state, 'connecting');
+  connected = true;
+  await h.tick();
+  h.app.ontoolresult({ structuredContent: preview({ frame: frame(1), frame_available: true }) });
+  assert.equal(h.elements.app.dataset.live, 'live');
 });
 
 test('empty screen explains connecting, offline, locked, authentication and paused states', async () => {
@@ -420,7 +452,7 @@ test('empty screen explains connecting, offline, locked, authentication and paus
   assert.equal(h.elements['empty-state'].dataset.state, 'connecting');
   assert.equal(h.elements['empty-state-text'].textContent, '正在连接');
   for (const [fields, state, label] of [
-    [{ frame_available: false }, 'offline', '未连接'],
+    [{ frame_available: false, service_ready: false }, 'offline', '未连接'],
     [{ paused: true, pause_reason: 'device_locked' }, 'locked', '等待解锁'],
     [{ paused: true, pause_reason: 'authentication' }, 'authentication', '请完成认证'],
     [{ paused: true, pause_reason: 'unknown' }, 'paused', '预览已暂停'],
@@ -513,7 +545,7 @@ test('a frame requested before authentication pause cannot restore cleared pixel
 
 test('status pill names the phone model and follows the stream state', async () => {
   const h = await harness();
-  assert.equal(h.elements.app.dataset.live, undefined);
+  assert.equal(h.elements.app.dataset.live, 'connecting');
   assert.equal(h.elements.model.textContent, '');
   h.app.ontoolresult({ structuredContent: preview({ frame: frame(1), frame_available: true, device: { model: 'iPhone 17 Pro Max' } }) });
   assert.equal(h.elements.model.textContent, 'iPhone 17 Pro Max');
@@ -608,6 +640,8 @@ test('refresh reports a real disconnected service instead of a success toast', a
   assert.equal(h.elements.toast.dataset.tone, 'error');
   assert.equal(h.elements['empty-state-text'].textContent, '未连接');
   assert.equal(h.elements.device.hidden, false);
+  h.app.ontoolresult({ structuredContent: preview({ frame_available: false }) });
+  assert.equal(h.elements['empty-state'].dataset.state, 'offline');
 });
 
 test('a poll from before user reconnect cannot put the recovered preview back in pause', async () => {
@@ -621,8 +655,8 @@ test('a poll from before user reconnect cannot put the recovered preview back in
   await flush();
   release({ structuredContent: preview({ paused: true, pause_reason: 'unknown' }) });
   await flush();
-  assert.equal(h.elements.app.dataset.live, 'offline');
-  assert.equal(h.elements['empty-state-text'].textContent, '未连接');
+  assert.equal(h.elements.app.dataset.live, 'connecting');
+  assert.equal(h.elements['empty-state-text'].textContent, '正在连接');
   assert.equal(h.calls.filter(call => call.name === 'pua_screen_action').length, 1);
 });
 

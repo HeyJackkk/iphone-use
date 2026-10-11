@@ -48,6 +48,8 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent
 .empty-state-icon g{display:none}
 #empty-state[data-state="connecting"] [data-icon="connecting"],#empty-state[data-state="offline"] [data-icon="offline"],#empty-state[data-state="locked"] [data-icon="locked"],#empty-state[data-state="authentication"] [data-icon="authentication"],#empty-state[data-state="paused"] [data-icon="paused"],#empty-state[data-state="unavailable"] [data-icon="unavailable"]{display:block}
 .empty-state-icon .symbol-dot{fill:currentColor;stroke:none}
+#empty-state[data-state="connecting"] [data-icon="connecting"]{transform-box:view-box;transform-origin:center;animation:connecting-spin 1s linear infinite}
+#app[data-page-visible="false"] [data-icon="connecting"]{animation-play-state:paused}
 /* Static masks retain a faint top/bottom bridge and let it join during phase fades.
    Colour and dot-wave phases keep their independent 8s and 4s opacity cycles. */
 .glow{position:absolute;inset:0;z-index:2;border-radius:inherit;opacity:0;transition:opacity .36s ease;pointer-events:none}
@@ -80,4 +82,5 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent
 @keyframes live-pulse{0%,100%{opacity:1}50%{opacity:.4}}
 @keyframes tool-busy{0%,100%{opacity:1}50%{opacity:.4}}
 @keyframes toast-in{from{opacity:0}to{opacity:1}}
-@media(prefers-reduced-motion:reduce){.glow{transition:none}#app[data-operating="true"] .glow,#app[data-operating="true"] .glow i:nth-child(n),#app[data-live="live"] .dot,#toolbar button[data-busy="true"],#toast{animation:none}#toolbar button{transition:none}.gesture-cursor{will-change:opacity}}
+@keyframes connecting-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.glow{transition:none}#app[data-operating="true"] .glow,#app[data-operating="true"] .glow i:nth-child(n),#app[data-live="live"] .dot,#toolbar button[data-busy="true"],#toast,#empty-state[data-state="connecting"] [data-icon="connecting"]{animation:none}#toolbar button{transition:none}.gesture-cursor{will-change:opacity}}

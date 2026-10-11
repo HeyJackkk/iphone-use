@@ -27,6 +27,7 @@ VIEWPORT_TTL = 30
 TYPING_FREQUENCY = 30
 TYPING_PIECE = 200
 CALL_BUDGET = 90
+DEFAULT_MAX_NODES = 200
 INPUT_TTL = 600
 # A selector that leads to no action is not retried in other spellings: the error hands back
 # the screen so the very next call can act by coordinates.
@@ -285,7 +286,7 @@ class PhoneController:
             self.snapshots.popitem(last=False)
         return ident
 
-    def observe(self,mode="tree",include_invisible=False,max_nodes=100,expensive_visibility=False):
+    def observe(self,mode="tree",include_invisible=False,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False):
         if mode not in ("tree","screenshot","both"):
             fail("invalid_argument","mode must be tree, screenshot or both.")
         integer(max_nodes,"max_nodes",1,500)
@@ -297,7 +298,7 @@ class PhoneController:
             app=self._source_app or self.active_app()
         return self.observation_from_state(nodes,viewport,app,mode,max_nodes,expensive_visibility)
 
-    def observation_from_state(self,nodes,viewport,app,mode,max_nodes=100,expensive_visibility=False):
+    def observation_from_state(self,nodes,viewport,app,mode,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False):
         result={"observation_id":self.remember(nodes,viewport,app,has_tree=mode!="screenshot"),
                 "observed_at":dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),"app":app,"viewport":viewport}
         if mode in ("tree","both"):
@@ -528,7 +529,7 @@ class PhoneController:
             self.client.reapply_settings()
             return False
 
-    def observe_after(self,mode,max_nodes=100):
+    def observe_after(self,mode,max_nodes=DEFAULT_MAX_NODES):
         """Post-action observation. A tree read may let PUA wait for the transition to end first."""
         if self.settle_seconds>0 and mode=="screenshot":
             # A screenshot has no such wait in WDA; give the transition a moment instead.
@@ -538,7 +539,7 @@ class PhoneController:
         try:return self.observe(mode,max_nodes=max_nodes)
         finally:self.cool_off(0)
 
-    def after(self,expect=None,observe="none",max_nodes=100):
+    def after(self,expect=None,observe="none",max_nodes=DEFAULT_MAX_NODES):
         result={"action_executed":True,"action_complete":True,"verified":False,"verification_deferred":True}
         if expect:
             result["postcondition"]=self.wait(expect);result.update(verified=True,verification_deferred=False)
@@ -739,7 +740,7 @@ class PhoneController:
     def modal_report(modals):
         return [compact_node(modal) for modal in modals]
 
-    def scroll_observation(self,nodes,viewport,mode,max_nodes=100):
+    def scroll_observation(self,nodes,viewport,mode,max_nodes=DEFAULT_MAX_NODES):
         if mode=="none":return None
         # The caller already read the complete tree and viewport. Reuse both;
         # adding a screenshot does not require another viewport/XML request.
@@ -769,7 +770,7 @@ class PhoneController:
         return False
 
     @action_result
-    def swipe(self,direction="up",region=None,observation_id=None,expect=None,verify=False,max_attempts=1,observe="none",_baseline=None,_max_nodes=100):
+    def swipe(self,direction="up",region=None,observation_id=None,expect=None,verify=False,max_attempts=1,observe="none",_baseline=None,_max_nodes=DEFAULT_MAX_NODES):
         if direction not in ("up","down","left","right"):fail("invalid_argument","Invalid direction.")
         if observe not in ("none","tree","screenshot","both"):fail("invalid_argument","Invalid observe mode.")
         integer(max_attempts,"max_attempts",1,2)
