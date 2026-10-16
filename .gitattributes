@@ -1,2 +1,3 @@
 # Unified patches require space-prefixed empty context lines.
 tooling/wda-security.patch -whitespace
+experiments/tree_element_handles/wda.patch -whitespace

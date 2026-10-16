@@ -31,7 +31,7 @@ def package_files(source_package=False):
         if not source.is_file():continue
         rel=source.relative_to(ROOT)
         if any(part in ('__pycache__','node_modules','.pytest_cache') for part in rel.parts):continue
-        if source.suffix in ('.pyc','.jsonl') or source.name in ('.DS_Store','posthog.local.json'):continue
+        if source.suffix in ('.pyc','.jsonl') or source.name in ('.DS_Store','posthog.local.json','ga4.local.json'):continue
         yield source,rel
 
 

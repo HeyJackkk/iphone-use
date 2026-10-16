@@ -43,6 +43,32 @@ def retire_previous_registration():
             Path(temporary).unlink()
 
 
+def registration_options():
+    """Preserve this server's environment; this fork keeps both providers disabled."""
+    previous = subprocess.run(["codex", "mcp", "get", "iphone_use", "--json"],
+                              capture_output=True, text=True, check=False)
+    environment = {}
+    interpreter = sys.executable
+    if previous.returncode == 0:
+        try:
+            transport = json.loads(previous.stdout)["transport"]
+            if transport.get("type") != "stdio":
+                raise ValueError("Existing registration is not stdio")
+            environment = transport.get("env") or {}
+            if not isinstance(environment, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                          for k, v in environment.items()):
+                raise ValueError("Invalid existing environment")
+            interpreter = transport.get("command", interpreter)
+            if not isinstance(interpreter, str) or not interpreter:
+                raise ValueError("Invalid interpreter")
+        except (KeyError, ValueError, TypeError, AttributeError):
+            raise SystemExit("Cannot safely preserve the existing iphone_use registration.") from None
+    environment = dict(environment)
+    environment.setdefault("PATH", os.environ.get("PATH", os.defpath))
+    environment.update(IPHONE_USE_ANALYTICS="0", DO_NOT_TRACK="1")
+    return interpreter, environment
+
+
 def main():
     installation=json.load(sys.stdin)
     if installation.get("pluginId")!="iphone-use@iphone-use-local":
@@ -54,7 +80,12 @@ def main():
     print(json.dumps(installation,ensure_ascii=False),flush=True)
     # Same name as the plugin registration: Config wins over Plugin in Codex,
     # so there is one namespace, without the shared agent-plugin tool budget.
-    subprocess.run(["codex","mcp","add","iphone_use","--","python3",str(server)],check=True)
+    interpreter, environment = registration_options()
+    command = ["codex", "mcp", "add", "iphone_use"]
+    for name, value in sorted(environment.items()):
+        command.extend(["--env", name + "=" + value])
+    command.extend(["--", interpreter, str(server)])
+    subprocess.run(command, check=True)
     retire_previous_registration()
 
 
